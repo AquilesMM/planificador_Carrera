@@ -198,7 +198,7 @@ class PlanDeCarrera:
         pendientes = [id_asignatura]
         while pendientes:
             actual = pendientes.pop()
-            for dependiente in dependientes_directos.get(actual, ()):
+            for dependiente in dependientes_directos.get(actual, ()): 
                 if dependiente not in visitados:
                     visitados.add(dependiente)
                     pendientes.append(dependiente)
@@ -281,35 +281,108 @@ class PlanDeCarrera:
         return alternativas
 
     # -----------------------------------------------------------------
-    # Respuestas puntuales al cuestionario del caso de Martín
-    # (reutilizable para cualquier estudiante, no solo Martín)
+    # Nueva: Alternativas parametrizables por criterio
     # -----------------------------------------------------------------
-    def responder_cuestionario(self) -> dict:
+    def generar_alternativas_por_criterio(
+        self,
+        criterios: dict | None = None,
+        max_acciones: int = 6
+    ) -> list[dict]:
+        """
+        Genera alternativas de planificación aplicando criterios personalizables.
+
+        Parámetros:
+        - criterios: dict que puede contener entradas predefinidas o un mapeo de pesos:
+            - Si es None -> se devuelven 3 alternativas estándar (avanzar/destrabar/equilibrado).
+            - Si pasa un dict con claves 'habilitadas', 'recursado', 'finales' (valores float),
+              se genera UNA alternativa usando esos pesos (se normalizan).
+            - También se acepta un dict con clave 'tipo': 'avanzar'|'destrabar'|'equilibrado'
+        - max_acciones: máximo número de acciones a listar por alternativa.
+
+        Retorna: lista de dicts con keys: titulo, descripcion, acciones, ventaja, desventaja.
+        """
         habilitadas = self.materias_habilitadas()
-        no_habilitadas = self.materias_no_habilitadas()
         a_recursar = self.materias_a_recursar()
-        finales = self.materias_con_final_pendiente()
+        finales_pendientes = self.materias_con_final_pendiente()
 
-        finales_priorizados = sorted(finales, key=lambda a: -len(self.impacto_futuro(a.id)))
+        def impacto(a: Asignatura) -> int:
+            return len(self.impacto_futuro(a.id))
 
-        consecuencias_recursado = []
-        for a in a_recursar:
-            consecuencias_recursado.extend(self.impacto_futuro(a.id))
+        # Formas estándar
+        if criterios is None:
+            return self.generar_alternativas()
 
-        respuestas = {
-            "1_puede_cursar": habilitadas,
-            "2_no_puede_cursar": no_habilitadas,
-            "3_consecuencias_no_regularizada": {
-                "materias": a_recursar,
-                "impacto": consecuencias_recursado,
-            },
-            "4_final_a_priorizar": finales_priorizados[0] if finales_priorizados else None,
-            "4_ranking_finales": finales_priorizados,
-            "5_materias_futuras_afectadas": {
-                a.nombre: self.impacto_futuro(a.id)
-                for a in (a_recursar + finales)
-            },
-            "6_alternativas": self.generar_alternativas(),
-            "7_avance_general": self.avance_general(),
+        # Si criterios es un dict con 'tipo' -> devolver la alternativa correspondiente
+        tipo = criterios.get("tipo") if isinstance(criterios, dict) else None
+        if tipo in ("avanzar", "destrabar", "equilibrado"):
+            if tipo == "avanzar":
+                return [{
+                    "titulo": "Alternativa — Avanzar todo lo posible",
+                    "descripcion": "Priorizar cursado de asignaturas ya habilitadas.",
+                    "acciones": [f"Cursar: {a.nombre} (Nivel {a.nivel})" for a in habilitadas][:max_acciones] or ["No hay asignaturas nuevas habilitadas."],
+                    "ventaja": "Mantiene ritmo de avance.",
+                    "desventaja": "No atenúa deudas pendientes.",
+                }]
+            if tipo == "destrabar":
+                acciones = []
+                acciones += [f"Recursar: {a.nombre} (destraba {impacto(a)} mat/s)" for a in sorted(a_recursar, key=impacto, reverse=True)]
+                acciones += [f"Rendir final: {a.nombre} (destraba {impacto(a)} mat/s)" for a in sorted(finales_pendientes, key=impacto, reverse=True)]
+                return [{
+                    "titulo": "Alternativa — Destrabar correlatividades",
+                    "descripcion": "Priorizar recursado y finales con mayor impacto a futuro.",
+                    "acciones": acciones[:max_acciones] or ["No hay materias a recursar ni finales pendientes."],
+                    "ventaja": "Reduce riesgo de cuellos de botella.",
+                    "desventaja": "Puede frenar avance de materias nuevas.",
+                }]
+            if tipo == "equilibrado":
+                acciones = []
+                acciones += [f"Cursar: {a.nombre}" for a in habilitadas[:2]]
+                acciones += [f"Recursar: {a.nombre}" for a in a_recursar[:2]]
+                acciones += [f"Preparar y rendir final: {a.nombre}" for a in sorted(finales_pendientes, key=impacto, reverse=True)[:2]]
+                return [{
+                    "titulo": "Alternativa — Equilibrada",
+                    "descripcion": "Combina materias nuevas, recursado y finales.",
+                    "acciones": acciones[:max_acciones] or ["Situación al día."],
+                    "ventaja": "Balance entre avance y regularización.",
+                    "desventaja": "Requiere organización en varios frentes.",
+                }]
+
+        # Si se pasan pesos (personalizados), normalizar y puntuar acciones
+        pesos = {
+            "habilitadas": float(criterios.get("habilitadas", 0)) if isinstance(criterios, dict) else 0.0,
+            "recursado": float(criterios.get("recursado", 0)) if isinstance(criterios, dict) else 0.0,
+            "finales": float(criterios.get("finales", 0)) if isinstance(criterios, dict) else 0.0,
         }
-        return respuestas
+        total_peso = sum(abs(v) for v in pesos.values()) or 1.0
+        for k in pesos:
+            pesos[k] = pesos[k] / total_peso
+
+        acciones_candidates: list[tuple[float, str]] = []
+
+        # Habilitadas -> puntuación base por nivel inversa (preferir próximo nivel)
+        for a in habilitadas:
+            score = pesos["habilitadas"] * (1.0 / max(1, a.nivel))  # niveles bajos -> mayor prioridad
+            acciones_candidates.append((score, f"Cursar: {a.nombre} (Nivel {a.nivel})"))
+
+        # Recursado -> puntuación según impacto
+        for a in a_recursar:
+            score = pesos["recursado"] * (impacto(a) + 1)
+            acciones_candidates.append((score, f"Recursar: {a.nombre} (impacto {impacto(a)})"))
+
+        # Finales -> puntuación según impacto
+        for a in finales_pendientes:
+            score = pesos["finales"] * (impacto(a) + 1)
+            acciones_candidates.append((score, f"Rendir final: {a.nombre} (impacto {impacto(a)})"))
+
+        acciones_ordenadas = [act for _, act in sorted(acciones_candidates, key=lambda x: -x[0]) if _ > 0][:max_acciones]
+
+        if not acciones_ordenadas:
+            acciones_ordenadas = ["No hay acciones recomendadas con los criterios dados."]
+
+        return [{
+            "titulo": "Alternativa personalizada",
+            "descripcion": f"Generada con pesos: {pesos}",
+            "acciones": acciones_ordenadas,
+            "ventaja": "Personalizable según criterio.",
+            "desventaja": "Depende de la calidad de los pesos provistos.",
+        }]
