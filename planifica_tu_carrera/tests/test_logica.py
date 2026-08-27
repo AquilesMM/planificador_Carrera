@@ -132,6 +132,18 @@ class TestCasoMartin(unittest.TestCase):
         alternativas = self.plan.generar_alternativas()
         self.assertEqual(len(alternativas), 3)
 
+    def test_generar_alternativa_tipo_destrabar(self):
+        alt = self.plan.generar_alternativas_por_criterio({"tipo": "destrabar"})
+        self.assertIsInstance(alt, list)
+        self.assertEqual(len(alt), 1)
+        self.assertIn("Destrabar", alt[0]["titulo"])
+
+    def test_generar_alternativa_personalizada(self):
+        alt = self.plan.generar_alternativas_por_criterio({"habilitadas": 0.1, "recursado": 0.1, "finales": 1.0})
+        self.assertIsInstance(alt, list)
+        self.assertEqual(len(alt), 1)
+        self.assertTrue(len(alt[0]["acciones"]) > 0)
+
 
 if __name__ == "__main__":
     unittest.main()
